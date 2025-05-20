@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Diagram>
+  <ID>JAVA</ID>
+  <OriginalElement>io.netty.channel.FixedRecvByteBufAllocator</OriginalElement>
+  <nodes>
+    <node x="246.0" y="240.0">io.netty.channel.FixedRecvByteBufAllocator</node>
+    <node x="0.0" y="240.0">io.netty.channel.AdaptiveRecvByteBufAllocator</node>
+    <node x="144.0" y="0.0">io.netty.channel.RecvByteBufAllocator</node>
+    <node x="103.0" y="80.0">io.netty.channel.MaxMessagesRecvByteBufAllocator</node>
+    <node x="82.0" y="160.0">io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator</node>
+  </nodes>
+  <notes />
+  <edges>
+    <edge source="io.netty.channel.FixedRecvByteBufAllocator" target="io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator">
+      <point x="0.0" y="-15.0" />
+      <point x="348.0" y="215.0" />
+      <point x="304.75" y="215.0" />
+      <point x="74.25" y="15.0" />
+    </edge>
+    <edge source="io.netty.channel.MaxMessagesRecvByteBufAllocator" target="io.netty.channel.RecvByteBufAllocator">
+      <point x="0.0" y="-15.0" />
+      <point x="0.0" y="15.0" />
+    </edge>
+    <edge source="io.netty.channel.AdaptiveRecvByteBufAllocator" target="io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator">
+      <point x="0.0" y="-15.0" />
+      <point x="113.0" y="215.0" />
+      <point x="156.25" y="215.0" />
+      <point x="-74.25" y="15.0" />
+    </edge>
+    <edge source="io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator" target="io.netty.channel.MaxMessagesRecvByteBufAllocator">
+      <point x="0.0" y="-15.0" />
+      <point x="0.0" y="15.0" />
+    </edge>
+  </edges>
+  <settings layout="Hierarchic Group" zoom="1.5" x="253.66666666666674" y="175.88095238095235" />
+  <SelectedNodes>
+    <node>io.netty.channel.DefaultMaxMessagesRecvByteBufAllocator</node>
+  </SelectedNodes>
+  <Categories />
+  <SCOPE>All</SCOPE>
+  <VISIBILITY>private</VISIBILITY>
+</Diagram>
+
