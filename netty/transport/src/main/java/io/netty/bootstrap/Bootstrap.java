@@ -38,11 +38,23 @@ import java.net.SocketAddress;
 import java.util.Collection;
 
 /**
- * A {@link Bootstrap} that makes it easy to bootstrap a {@link Channel} to use
- * for clients.
+ * 一个 {@link Bootstrap}，用于简化客户端 {@link Channel} 的引导过程。
  *
- * <p>The {@link #bind()} methods are useful in combination with connectionless transports such as datagram (UDP).
- * For regular TCP connections, please use the provided {@link #connect()} methods.</p>
+ * <p>当与无连接传输（如 UDP）结合使用时，{@link #bind()} 方法非常有用。
+ * 对于常规的 TCP 连接，请使用提供的 {@link #connect()} 方法。</p>
+ *
+ * <p><b>核心作用：</b> 负责客户端 Channel 的创建、配置、注册、连接等全生命周期管理，支持异步、可扩展、链式调用。</p>
+ *
+ * <p><b>典型用法：</b>
+ * <pre>
+ *   Bootstrap b = new Bootstrap();
+ *   b.group(...)
+ *    .channel(...)
+ *    .handler(...)
+ *    .remoteAddress(...);
+ *   ChannelFuture f = b.connect();
+ * </pre>
+ * </p>
  */
 public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
 
@@ -50,8 +62,11 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
 
     private final BootstrapConfig config = new BootstrapConfig(this);
 
+    // 外部地址解析器，支持自定义 DNS/主机名解析
     private ExternalAddressResolver externalResolver;
+    // 是否禁用地址解析
     private volatile boolean disableResolver;
+    // 远程连接地址
     private volatile SocketAddress remoteAddress;
 
     public Bootstrap() { }
@@ -64,10 +79,11 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Sets the {@link NameResolver} which will resolve the address of the unresolved named address.
+     * 设置 {@link NameResolver}，用于解析未解析的命名地址。
      *
-     * @param resolver the {@link NameResolver} for this {@code Bootstrap}; may be {@code null}, in which case a default
-     *                 resolver will be used
+     * <b>常见场景：</b> 需要自定义 DNS 解析、支持多种地址族、或特殊网络环境下。
+     *
+     * @param resolver 该 {@code Bootstrap} 的 {@link NameResolver}；可以为 {@code null}，此时将使用默认解析器
      *
      * @see io.netty.resolver.DefaultAddressResolverGroup
      */
@@ -78,8 +94,9 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Disables address name resolution. Name resolution may be re-enabled with
-     * {@link Bootstrap#resolver(AddressResolverGroup)}
+     * 禁用地址名称解析。可通过 {@link Bootstrap#resolver(AddressResolverGroup)} 重新启用。
+     *
+     * <b>典型场景：</b> 远程地址已是 IP，无需 DNS 解析，或自定义了连接逻辑。
      */
     public Bootstrap disableResolver() {
         externalResolver = null;
@@ -88,8 +105,9 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * The {@link SocketAddress} to connect to once the {@link #connect()} method
-     * is called.
+     * 在调用 {@link #connect()} 方法后要连接的 {@link SocketAddress}。
+     *
+     * <b>注意：</b> 必须设置，否则 connect() 会抛出 IllegalStateException。
      */
     public Bootstrap remoteAddress(SocketAddress remoteAddress) {
         this.remoteAddress = remoteAddress;
@@ -97,7 +115,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * @see #remoteAddress(SocketAddress)
+     * 通过主机名和端口设置远程地址，内部会创建未解析的 InetSocketAddress。
      */
     public Bootstrap remoteAddress(String inetHost, int inetPort) {
         remoteAddress = InetSocketAddress.createUnresolved(inetHost, inetPort);
@@ -105,7 +123,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * @see #remoteAddress(SocketAddress)
+     * 通过 IP 和端口设置远程地址。
      */
     public Bootstrap remoteAddress(InetAddress inetHost, int inetPort) {
         remoteAddress = new InetSocketAddress(inetHost, inetPort);
@@ -113,7 +131,12 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Connect a {@link Channel} to the remote peer.
+     * 连接到远程节点。
+     *
+     * <b>核心入口：</b> 完成参数校验、注册 Channel、异步解析地址、最终发起连接。
+     *
+     * @return ChannelFuture，异步通知连接结果
+     * @throws IllegalStateException 未设置 remoteAddress
      */
     public ChannelFuture connect() {
         validate();
@@ -126,21 +149,25 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Connect a {@link Channel} to the remote peer.
+     * 通过主机名和端口连接远程节点。
      */
     public ChannelFuture connect(String inetHost, int inetPort) {
         return connect(InetSocketAddress.createUnresolved(inetHost, inetPort));
     }
 
     /**
-     * Connect a {@link Channel} to the remote peer.
+     * 通过 IP 和端口连接远程节点。
      */
     public ChannelFuture connect(InetAddress inetHost, int inetPort) {
         return connect(new InetSocketAddress(inetHost, inetPort));
     }
 
     /**
-     * Connect a {@link Channel} to the remote peer.
+     * 通过 SocketAddress 连接远程节点。
+     *
+     * <b>调用链说明：</b> connect() -> doResolveAndConnect() -> doResolveAndConnect0() -> doConnect()
+     *
+     * <b>异步机制：</b> 注册、解析、连接均为异步，结果通过 ChannelFuture 通知。
      */
     public ChannelFuture connect(SocketAddress remoteAddress) {
         ObjectUtil.checkNotNull(remoteAddress, "remoteAddress");
@@ -149,7 +176,9 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Connect a {@link Channel} to the remote peer.
+     * 通过远程和本地地址连接。
+     *
+     * <b>高级用法：</b> 可指定本地绑定端口（如多网卡、多端口需求）。
      */
     public ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress) {
         ObjectUtil.checkNotNull(remoteAddress, "remoteAddress");
@@ -158,7 +187,14 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * @see #connect()
+     * 内部核心流程：注册 Channel、异步解析远程地址、最终发起连接。
+     *
+     * <b>流程详解：</b>
+     * 1. initAndRegister()：初始化并注册 Channel 到 EventLoop。
+     * 2. 若注册已完成，直接进入 doResolveAndConnect0。
+     * 3. 若注册未完成，添加监听器，注册完成后再进入 doResolveAndConnect0。
+     *
+     * <b>易错点：</b> 注册失败时直接返回失败的 ChannelFuture。
      */
     private ChannelFuture doResolveAndConnect(final SocketAddress remoteAddress, final SocketAddress localAddress) {
         final ChannelFuture regFuture = initAndRegister();
@@ -170,21 +206,19 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
             }
             return doResolveAndConnect0(channel, remoteAddress, localAddress, channel.newPromise());
         } else {
-            // Registration future is almost always fulfilled already, but just in case it's not.
+            // 注册通常已经完成，但以防万一未完成。
             final PendingRegistrationPromise promise = new PendingRegistrationPromise(channel);
             regFuture.addListener(new ChannelFutureListener() {
                 @Override
                 public void operationComplete(ChannelFuture future) throws Exception {
-                    // Directly obtain the cause and do a null check so we only need one volatile read in case of a
-                    // failure.
+                    // 直接获取异常并做 null 检查，减少 volatile 读取。
                     Throwable cause = future.cause();
                     if (cause != null) {
-                        // Registration on the EventLoop failed so fail the ChannelPromise directly to not cause an
-                        // IllegalStateException once we try to access the EventLoop of the Channel.
+                        // EventLoop 注册失败，直接失败 promise，避免后续访问 Channel 的 EventLoop 时抛出 IllegalStateException。
                         promise.setFailure(cause);
                     } else {
-                        // Registration was successful, so set the correct executor to use.
-                        // See https://github.com/netty/netty/issues/2586
+                        // 注册成功，设置正确的执行器。
+                        // 详见 https://github.com/netty/netty/issues/2586
                         promise.registered();
                         doResolveAndConnect0(channel, remoteAddress, localAddress, promise);
                     }
@@ -194,6 +228,17 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         }
     }
 
+    /**
+     * 地址解析与连接的核心实现。
+     *
+     * <b>详细流程：</b>
+     * 1. 若禁用解析，直接连接。
+     * 2. 获取 EventLoop 对应的 AddressResolver。
+     * 3. 若地址已解析或不支持，直接连接。
+     * 4. 否则异步解析，解析完成后再连接。
+     *
+     * <b>异常处理：</b> 解析失败会关闭 Channel 并设置失败。
+     */
     private ChannelFuture doResolveAndConnect0(final Channel channel, SocketAddress remoteAddress,
                                                final SocketAddress localAddress, final ChannelPromise promise) {
         try {
@@ -212,7 +257,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
             }
 
             if (!resolver.isSupported(remoteAddress) || resolver.isResolved(remoteAddress)) {
-                // Resolver has no idea about what to do with the specified remote address or it's resolved already.
+                // 解析器不支持该地址或已解析，直接连接。
                 doConnect(remoteAddress, localAddress, promise);
                 return promise;
             }
@@ -223,17 +268,17 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
                 final Throwable resolveFailureCause = resolveFuture.cause();
 
                 if (resolveFailureCause != null) {
-                    // Failed to resolve immediately
+                    // 立即解析失败
                     channel.close();
                     promise.setFailure(resolveFailureCause);
                 } else {
-                    // Succeeded to resolve immediately; cached? (or did a blocking lookup)
+                    // 立即解析成功（可能是缓存或阻塞查找）
                     doConnect(resolveFuture.getNow(), localAddress, promise);
                 }
                 return promise;
             }
 
-            // Wait until the name resolution is finished.
+            // 等待名称解析完成。
             resolveFuture.addListener(new FutureListener<SocketAddress>() {
                 @Override
                 public void operationComplete(Future<SocketAddress> future) throws Exception {
@@ -251,11 +296,17 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         return promise;
     }
 
+    /**
+     * 真正发起连接的地方。
+     *
+     * <b>异步执行：</b> 通过 EventLoop 执行，保证线程安全。
+     * <b>本地地址可选：</b> 若 localAddress 为 null，则只指定远程地址。
+     * <b>失败监听：</b> 添加 CLOSE_ON_FAILURE，连接失败自动关闭 Channel。
+     */
     private static void doConnect(
             final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise connectPromise) {
 
-        // This method is invoked before channelRegistered() is triggered.  Give user handlers a chance to set up
-        // the pipeline in its channelRegistered() implementation.
+        // 该方法在 channelRegistered() 触发前调用，给用户 handler 在 channelRegistered() 中设置 pipeline 的机会。
         final Channel channel = connectPromise.channel();
         channel.eventLoop().execute(new Runnable() {
             @Override
@@ -270,6 +321,11 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         });
     }
 
+    /**
+     * 初始化 Channel，设置 handler、options、attributes 等。
+     *
+     * <b>扩展点：</b> 支持 ChannelInitializerExtension，可用于自定义初始化逻辑。
+     */
     @Override
     void init(Channel channel) {
         ChannelPipeline p = channel.pipeline();
@@ -289,6 +345,11 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         }
     }
 
+    /**
+     * 校验配置项，确保 handler 已设置。
+     *
+     * <b>易错点：</b> 未设置 handler 会抛出 IllegalStateException。
+     */
     @Override
     public Bootstrap validate() {
         super.validate();
@@ -305,9 +366,10 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     /**
-     * Returns a deep clone of this bootstrap which has the identical configuration except that it uses
-     * the given {@link EventLoopGroup}. This method is useful when making multiple {@link Channel}s with similar
-     * settings.
+     * 返回该 bootstrap 的深拷贝，除了使用指定的 {@link EventLoopGroup} 外，其他配置完全一致。
+     * 该方法适用于创建多个具有相似设置的 {@link Channel}。
+     *
+     * <b>常见用法：</b> 批量创建连接时，复用配置但切换 group。
      */
     public Bootstrap clone(EventLoopGroup group) {
         Bootstrap bs = new Bootstrap(this);
@@ -320,10 +382,12 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         return config;
     }
 
+    // 获取远程地址（内部使用）
     final SocketAddress remoteAddress() {
         return remoteAddress;
     }
 
+    // 获取地址解析器（内部使用）
     final AddressResolverGroup<?> resolver() {
         if (disableResolver) {
             return null;
@@ -331,8 +395,10 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         return ExternalAddressResolver.getOrDefault(externalResolver);
     }
 
-    /* Holder to avoid NoClassDefFoundError in case netty-resolver dependency is excluded
-       (e.g. some address families do not need name resolution) */
+    /*
+       Holder 类用于避免在排除 netty-resolver 依赖时出现 NoClassDefFoundError
+       （例如某些地址族不需要名称解析）
+     */
     static final class ExternalAddressResolver {
         final AddressResolverGroup<SocketAddress> resolverGroup;
 

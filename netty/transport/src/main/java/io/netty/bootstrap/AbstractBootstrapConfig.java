@@ -27,25 +27,63 @@ import java.net.SocketAddress;
 import java.util.Map;
 
 /**
- * Exposes the configuration of an {@link AbstractBootstrap}.
+ * {@link AbstractBootstrapConfig} 用于暴露和封装 {@link AbstractBootstrap} 的配置信息，
+ * 便于只读访问和调试，防止外部直接修改引导配置。
+ * <p>
+ * <b>设计理念：</b>
+ * <ul>
+ *   <li>只读视图：所有配置均通过 getter 只读访问，防止外部修改。</li>
+ *   <li>解耦主流程与配置读取：便于在 handler、扩展等场景下安全获取引导参数。</li>
+ *   <li>便于调试和日志输出：toString() 输出完整配置信息。</li>
+ * </ul>
+ *
+ * <b>泛型说明：</b>
+ * <ul>
+ *   <li>B：具体的 Bootstrap 类型，必须继承自 AbstractBootstrap。常见如 Bootstrap、ServerBootstrap。</li>
+ *   <li>C：Channel 类型，指定网络通信的通道实现，如 NioSocketChannel、NioServerSocketChannel。</li>
+ * </ul>
+ *
+ * <b>典型用法：</b>
+ * <pre>
+ *   AbstractBootstrapConfig config = bootstrap.config();
+ *   EventLoopGroup group = config.group();
+ *   Map<ChannelOption<?>, Object> opts = config.options();
+ * </pre>
+ *
+ * <b>线程安全说明：</b>
+ * - 该类仅提供只读访问，不涉及并发写操作，线程安全。
+ *
+ * <b>与 AbstractBootstrap 的关系：</b>
+ * - 持有对 AbstractBootstrap 的引用，所有 getter 均委托给 bootstrap 实例。
+ * - 适合在 handler、扩展、调试等场景下安全获取配置。
  */
 public abstract class AbstractBootstrapConfig<B extends AbstractBootstrap<B, C>, C extends Channel> {
 
+    /**
+     * 持有的引导对象，类型为 B（如 Bootstrap、ServerBootstrap）。
+     * 只读引用，防止外部修改。
+     */
     protected final B bootstrap;
 
+    /**
+     * 构造方法，传入具体的 bootstrap 实例。
+     * @param bootstrap 具体的引导对象，不能为空
+     */
     protected AbstractBootstrapConfig(B bootstrap) {
         this.bootstrap = ObjectUtil.checkNotNull(bootstrap, "bootstrap");
     }
 
     /**
-     * Returns the configured local address or {@code null} if non is configured yet.
+     * 获取已配置的本地绑定地址。
+     * @return SocketAddress，若未配置则为 null
      */
     public final SocketAddress localAddress() {
         return bootstrap.localAddress();
     }
 
     /**
-     * Returns the configured {@link ChannelFactory} or {@code null} if non is configured yet.
+     * 获取已配置的 ChannelFactory。
+     * @return ChannelFactory，若未配置则为 null
      */
     @SuppressWarnings("deprecation")
     public final ChannelFactory<? extends C> channelFactory() {
@@ -53,34 +91,42 @@ public abstract class AbstractBootstrapConfig<B extends AbstractBootstrap<B, C>,
     }
 
     /**
-     * Returns the configured {@link ChannelHandler} or {@code null} if non is configured yet.
+     * 获取已配置的 ChannelHandler。
+     * @return ChannelHandler，若未配置则为 null
      */
     public final ChannelHandler handler() {
         return bootstrap.handler();
     }
 
     /**
-     * Returns a copy of the configured options.
+     * 获取已配置的 ChannelOption 只读副本。
+     * @return Map，包含所有 option 配置
      */
     public final Map<ChannelOption<?>, Object> options() {
         return bootstrap.options();
     }
 
     /**
-     * Returns a copy of the configured attributes.
+     * 获取已配置的 Attribute 只读副本。
+     * @return Map，包含所有 attribute 配置
      */
     public final Map<AttributeKey<?>, Object> attrs() {
         return bootstrap.attrs();
     }
 
     /**
-     * Returns the configured {@link EventLoopGroup} or {@code null} if non is configured yet.
+     * 获取已配置的 EventLoopGroup。
+     * @return EventLoopGroup，若未配置则为 null
      */
     @SuppressWarnings("deprecation")
     public final EventLoopGroup group() {
         return bootstrap.group();
     }
 
+    /**
+     * 输出完整配置信息，便于调试和日志分析。
+     * @return 配置字符串
+     */
     @Override
     public String toString() {
         StringBuilder buf = new StringBuilder()
