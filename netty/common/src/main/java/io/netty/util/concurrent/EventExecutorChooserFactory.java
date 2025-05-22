@@ -16,22 +16,31 @@
 package io.netty.util.concurrent;
 
 /**
- * Factory that creates new {@link EventExecutorChooser}s.
+ * 用于创建新的 {@link EventExecutorChooser} 的工厂接口。
+ * {@link EventExecutorChooser} 负责从一组 {@link EventExecutor} 中选择一个来执行任务。
+ * 这个工厂模式允许用户根据需要实现自定义的选择策略。
  */
 public interface EventExecutorChooserFactory {
 
     /**
-     * Returns a new {@link EventExecutorChooser}.
+     * 根据给定的 {@link EventExecutor} 数组，返回一个新的 {@link EventExecutorChooser} 实例。
+     *
+     * @param executors 一组 {@link EventExecutor}，选择器将从中进行选择。
+     * @return 一个新的 {@link EventExecutorChooser} 实例。
      */
     EventExecutorChooser newChooser(EventExecutor[] executors);
 
     /**
-     * Chooses the next {@link EventExecutor} to use.
+     * 负责选择下一个要使用的 {@link EventExecutor} 的接口。
+     * 实现此接口的类定义了具体的选择逻辑，例如轮询、随机或基于负载的选择等。
      */
     interface EventExecutorChooser {
 
         /**
-         * Returns the new {@link EventExecutor} to use.
+         * 返回下一个要使用的 {@link EventExecutor}。
+         * 每次调用此方法都可能返回不同的 {@link EventExecutor}，具体取决于实现的选择策略。
+         *
+         * @return 下一个 {@link EventExecutor}。
          */
         EventExecutor next();
     }
