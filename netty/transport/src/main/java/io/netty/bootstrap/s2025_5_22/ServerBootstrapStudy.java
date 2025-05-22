@@ -8,6 +8,7 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.IntSupplier;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import io.netty.util.concurrent.EventExecutorChooserFactory;
 
 import java.nio.channels.spi.SelectorProvider;
 import java.util.concurrent.Executor;
@@ -60,7 +61,13 @@ public class ServerBootstrapStudy {
 				return new NioIoHandler();
 			}
 		};
-		new MultiThreadIoEventLoopGroup(1, defaultThreadFactory, SelectorProvider.provider(),  );
+		EventExecutorChooserFactory eventExecutorChooserFactory = new EventExecutorChooserFactory() {
+			@Override
+			public EventExecutorChooser newEventExecutorChooser(EventLoopGroup parent, int nThreads) {
+				return new DefaultEventExecutorChooser(parent, nThreads);
+			}
+		};
+		new MultiThreadIoEventLoopGroup(1, defaultThreadFactory, eventExecutorChooserFactory, ioHandlerFactory );
 		ServerBootstrap b = new ServerBootstrap();
 		b.group(bossGroup, workerGroup)           // 主从线程组
 		 .channel(NioServerSocketChannel.class)   // 服务端通道类型
