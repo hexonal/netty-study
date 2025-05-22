@@ -31,34 +31,44 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.util.concurrent.TimeUnit;
 
 /**
- * <p>AbstractTrafficShapingHandler allows to limit the global bandwidth
+ * <p>
+ * AbstractTrafficShapingHandler allows to limit the global bandwidth
  * (see {@link GlobalTrafficShapingHandler}) or per session
  * bandwidth (see {@link ChannelTrafficShapingHandler}), as traffic shaping.
- * It allows you to implement an almost real time monitoring of the bandwidth using
- * the monitors from {@link TrafficCounter} that will call back every checkInterval
- * the method doAccounting of this handler.</p>
+ * It allows you to implement an almost real time monitoring of the bandwidth
+ * using
+ * the monitors from {@link TrafficCounter} that will call back every
+ * checkInterval
+ * the method doAccounting of this handler.
+ * </p>
  *
- * <p>If you want for any particular reasons to stop the monitoring (accounting) or to change
- * the read/write limit or the check interval, several methods allow that for you:</p>
+ * <p>
+ * If you want for any particular reasons to stop the monitoring (accounting) or
+ * to change
+ * the read/write limit or the check interval, several methods allow that for
+ * you:
+ * </p>
  * <ul>
- * <li><tt>configure</tt> allows you to change read or write limits, or the checkInterval</li>
- * <li><tt>getTrafficCounter</tt> allows you to have access to the TrafficCounter and so to stop
- * or start the monitoring, to change the checkInterval directly, or to have access to its values.</li>
+ * <li><tt>configure</tt> allows you to change read or write limits, or the
+ * checkInterval</li>
+ * <li><tt>getTrafficCounter</tt> allows you to have access to the
+ * TrafficCounter and so to stop
+ * or start the monitoring, to change the checkInterval directly, or to have
+ * access to its values.</li>
  * </ul>
  */
 public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler {
-    private static final InternalLogger logger =
-            InternalLoggerFactory.getInstance(AbstractTrafficShapingHandler.class);
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractTrafficShapingHandler.class);
     /**
      * Default delay between two checks: 1s
      */
     public static final long DEFAULT_CHECK_INTERVAL = 1000;
 
-   /**
-    * Default max delay in case of traffic shaping
-    * (during which no communication will occur).
-    * Shall be less than TIMEOUT. Here half of "standard" 30s
-    */
+    /**
+     * Default max delay in case of traffic shaping
+     * (during which no communication will occur).
+     * Shall be less than TIMEOUT. Here half of "standard" 30s
+     */
     public static final long DEFAULT_MAX_TIME = 15000;
 
     /**
@@ -96,22 +106,70 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
      */
     protected volatile long checkInterval = DEFAULT_CHECK_INTERVAL; // default 1 s
 
+    /**
+     * READ_SUSPENDED 是一个 {@link AttributeKey}，用于在 {@link Channel} 的属性中标记其读操作是否已被暂停。
+     * 当流量整形处理器因为读取速率超过限制而需要暂停从 Channel 读取数据时，会将此属性设置为 {@code true}。
+     * 当流量允许或通过定时任务恢复读取时，此属性会重新设置为 {@code false}。
+     * <p>
+     * <b>典型使用场景:</b>
+     * <ul>
+     * <li>在 {@code channelRead} 方法中，如果计算出的等待时间 {@code wait} 大于阈值，
+     * 并且 Channel 当前是自动读取 (autoRead) 状态且处理器是活动的，则会将此属性设为 true，
+     * 并关闭 Channel 的 autoRead。</li>
+     * <li>在 {@link ReopenReadTimerTask} 中，用于检查 Channel 是否应该恢复读取。</li>
+     * <li>在 {@code releaseReadSuspended} 方法中，将此属性设为 false 并重新开启 autoRead。</li>
+     * </ul>
+     * <b>日志场景:</b>
+     * <ul>
+     * <li>当暂停读取 (READ_SUSPENDED 设置为 true) 时，可以记录 DEBUG 级别日志，说明原因和 Channel 状态。</li>
+     * <li>当恢复读取 (READ_SUSPENDED 设置为 false) 时，可以记录 DEBUG 级别日志。</li>
+     * </ul>
+     * 名称的构成：使用类全名加上 ".READ_SUSPENDED" 后缀，以保证 {@link AttributeKey} 的全局唯一性，
+     * 避免与其他处理器中可能存在的同名键冲突。
+     */
     static final AttributeKey<Boolean> READ_SUSPENDED = AttributeKey
             .valueOf(AbstractTrafficShapingHandler.class.getName() + ".READ_SUSPENDED");
+
+    /**
+     * REOPEN_TASK 是一个 {@link AttributeKey}，用于在 {@link Channel} 的属性中存储一个
+     * {@link Runnable} 任务，
+     * 该任务负责在读取操作被暂停后重新打开（或恢复）读取。
+     * 当流量整形导致读取暂停时，会创建一个 {@link ReopenReadTimerTask} 并通过此键存储在 Channel 的属性中，
+     * 以便后续可以通过调度器在适当的时机执行它，从而恢复 Channel 的读取能力。
+     * <p>
+     * <b>典型使用场景:</b>
+     * <ul>
+     * <li>在 {@code channelRead} 方法中，当决定暂停读取时，如果 Channel 属性中不存在此任务，
+     * 则会创建一个新的 {@link ReopenReadTimerTask} 并通过此键存入 Channel 属性。</li>
+     * <li>该任务随后会被调度执行，在任务的 {@code run} 方法内部会尝试恢复 Channel 的读取 (设置 autoRead 为 true
+     * 并调用 {@code channel.read()})。
+     * 这样做可以避免重复创建任务对象。</li>
+     * </ul>
+     * <b>日志场景:</b>
+     * <ul>
+     * <li>当创建或复用 {@link ReopenReadTimerTask} 并将其存储到 Channel 属性时，可以记录 DEBUG
+     * 级别日志。</li>
+     * <li>当 {@link ReopenReadTimerTask} 被执行以尝试恢复读取时，其内部逻辑会记录相关的 DEBUG 日志。</li>
+     * </ul>
+     * 名称的构成：使用类全名加上 ".REOPEN_TASK" 后缀，以保证 {@link AttributeKey} 的全局唯一性。
+     */
     static final AttributeKey<Runnable> REOPEN_TASK = AttributeKey.valueOf(AbstractTrafficShapingHandler.class
             .getName() + ".REOPEN_TASK");
 
     /**
-     * Max time to delay before proposing to stop writing new objects from next handlers
+     * Max time to delay before proposing to stop writing new objects from next
+     * handlers
      */
     volatile long maxWriteDelay = 4 * DEFAULT_CHECK_INTERVAL; // default 4 s
     /**
-     * Max size in the list before proposing to stop writing new objects from next handlers
+     * Max size in the list before proposing to stop writing new objects from next
+     * handlers
      */
     volatile long maxWriteSize = DEFAULT_MAX_SIZE; // default 4MB
 
     /**
-     * Rank in UserDefinedWritability (1 for Channel, 2 for Global TrafficShapingHandler).
+     * Rank in UserDefinedWritability (1 for Channel, 2 for Global
+     * TrafficShapingHandler).
      * Set in final constructor. Must be between 1 and 31
      */
     final int userDefinedWritabilityIndex;
@@ -133,18 +191,21 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
 
     /**
      * @param newTrafficCounter
-     *            the TrafficCounter to set
+     *                          the TrafficCounter to set
      */
     void setTrafficCounter(TrafficCounter newTrafficCounter) {
         trafficCounter = newTrafficCounter;
     }
 
     /**
-     * @return the index to be used by the TrafficShapingHandler to manage the user defined writability.
-     *              For Channel TSH it is defined as {@value #CHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX},
-     *              for Global TSH it is defined as {@value #GLOBAL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX},
-     *              for GlobalChannel TSH it is defined as
-     *              {@value #GLOBALCHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX}.
+     * @return the index to be used by the TrafficShapingHandler to manage the user
+     *         defined writability.
+     *         For Channel TSH it is defined as
+     *         {@value #CHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX},
+     *         for Global TSH it is defined as
+     *         {@value #GLOBAL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX},
+     *         for GlobalChannel TSH it is defined as
+     *         {@value #GLOBALCHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX}.
      */
     protected int userDefinedWritabilityIndex() {
         return CHANNEL_DEFAULT_USER_DEFINED_WRITABILITY_INDEX;
@@ -152,15 +213,15 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
 
     /**
      * @param writeLimit
-     *          0 or a limit in bytes/s
+     *                      0 or a limit in bytes/s
      * @param readLimit
-     *          0 or a limit in bytes/s
+     *                      0 or a limit in bytes/s
      * @param checkInterval
-     *            The delay between two computations of performances for
-     *            channels or 0 if no stats are to be computed.
+     *                      The delay between two computations of performances for
+     *                      channels or 0 if no stats are to be computed.
      * @param maxTime
-     *            The maximum delay to wait in case of traffic excess.
-     *            Must be positive.
+     *                      The maximum delay to wait in case of traffic excess.
+     *                      Must be positive.
      */
     protected AbstractTrafficShapingHandler(long writeLimit, long readLimit, long checkInterval, long maxTime) {
         if (maxTime <= 0) {
@@ -175,34 +236,38 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * Constructor using default max time as delay allowed value of {@value #DEFAULT_MAX_TIME} ms.
+     * Constructor using default max time as delay allowed value of
+     * {@value #DEFAULT_MAX_TIME} ms.
+     * 
      * @param writeLimit
-     *            0 or a limit in bytes/s
+     *                      0 or a limit in bytes/s
      * @param readLimit
-     *            0 or a limit in bytes/s
+     *                      0 or a limit in bytes/s
      * @param checkInterval
-     *            The delay between two computations of performances for
-     *            channels or 0 if no stats are to be computed.
+     *                      The delay between two computations of performances for
+     *                      channels or 0 if no stats are to be computed.
      */
     protected AbstractTrafficShapingHandler(long writeLimit, long readLimit, long checkInterval) {
         this(writeLimit, readLimit, checkInterval, DEFAULT_MAX_TIME);
     }
 
     /**
-     * Constructor using default Check Interval value of {@value #DEFAULT_CHECK_INTERVAL} ms and
+     * Constructor using default Check Interval value of
+     * {@value #DEFAULT_CHECK_INTERVAL} ms and
      * default max time as delay allowed value of {@value #DEFAULT_MAX_TIME} ms.
      *
      * @param writeLimit
-     *          0 or a limit in bytes/s
+     *                   0 or a limit in bytes/s
      * @param readLimit
-     *          0 or a limit in bytes/s
+     *                   0 or a limit in bytes/s
      */
     protected AbstractTrafficShapingHandler(long writeLimit, long readLimit) {
         this(writeLimit, readLimit, DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_TIME);
     }
 
     /**
-     * Constructor using NO LIMIT, default Check Interval value of {@value #DEFAULT_CHECK_INTERVAL} ms and
+     * Constructor using NO LIMIT, default Check Interval value of
+     * {@value #DEFAULT_CHECK_INTERVAL} ms and
      * default max time as delay allowed value of {@value #DEFAULT_MAX_TIME} ms.
      */
     protected AbstractTrafficShapingHandler() {
@@ -214,8 +279,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
      * default max time as delay allowed value of {@value #DEFAULT_MAX_TIME} ms.
      *
      * @param checkInterval
-     *            The delay between two computations of performances for
-     *            channels or 0 if no stats are to be computed.
+     *                      The delay between two computations of performances for
+     *                      channels or 0 if no stats are to be computed.
      */
     protected AbstractTrafficShapingHandler(long checkInterval) {
         this(0, 0, checkInterval, DEFAULT_MAX_TIME);
@@ -223,14 +288,18 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
 
     /**
      * Change the underlying limitations and check interval.
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
-     * @param newWriteLimit The new write limit (in bytes)
-     * @param newReadLimit The new read limit (in bytes)
+     * @param newWriteLimit    The new write limit (in bytes)
+     * @param newReadLimit     The new read limit (in bytes)
      * @param newCheckInterval The new check interval (in milliseconds)
      */
     public void configure(long newWriteLimit, long newReadLimit,
@@ -241,14 +310,18 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
 
     /**
      * Change the underlying limitations.
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
      * @param newWriteLimit The new write limit (in bytes)
-     * @param newReadLimit The new read limit (in bytes)
+     * @param newReadLimit  The new read limit (in bytes)
      */
     public void configure(long newWriteLimit, long newReadLimit) {
         writeLimit = newWriteLimit;
@@ -278,11 +351,15 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
      * @param writeLimit the writeLimit to set
      */
@@ -301,11 +378,15 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
      * @param readLimit the readLimit to set
      */
@@ -324,7 +405,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * @param checkInterval the interval in ms between each step check to set, default value being 1000 ms.
+     * @param checkInterval the interval in ms between each step check to set,
+     *                      default value being 1000 ms.
      */
     public void setCheckInterval(long checkInterval) {
         this.checkInterval = checkInterval;
@@ -334,15 +416,20 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
      * @param maxTime
-     *            Max delay in wait, shall be less than TIME OUT in related protocol.
-     *            Must be positive.
+     *                Max delay in wait, shall be less than TIME OUT in related
+     *                protocol.
+     *                Must be positive.
      */
     public void setMaxTimeWait(long maxTime) {
         if (maxTime <= 0) {
@@ -366,14 +453,19 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * <p>Note the change will be taken as best effort, meaning
+     * <p>
+     * Note the change will be taken as best effort, meaning
      * that all already scheduled traffics will not be
-     * changed, but only applied to new traffics.</p>
-     * <p>So the expected usage of this method is to be used not too often,
-     * accordingly to the traffic shaping configuration.</p>
+     * changed, but only applied to new traffics.
+     * </p>
+     * <p>
+     * So the expected usage of this method is to be used not too often,
+     * accordingly to the traffic shaping configuration.
+     * </p>
      *
-     * @param maxWriteDelay the maximum Write Delay in ms in the buffer allowed before write suspension is set.
-     *              Must be positive.
+     * @param maxWriteDelay the maximum Write Delay in ms in the buffer allowed
+     *                      before write suspension is set.
+     *                      Must be positive.
      */
     public void setMaxWriteDelay(long maxWriteDelay) {
         if (maxWriteDelay <= 0) {
@@ -390,16 +482,22 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * <p>Note that this limit is a best effort on memory limitation to prevent Out Of
+     * <p>
+     * Note that this limit is a best effort on memory limitation to prevent Out Of
      * Memory Exception. To ensure it works, the handler generating the write should
-     * use one of the way provided by Netty to handle the capacity:</p>
-     * <p>- the {@code Channel.isWritable()} property and the corresponding
-     * {@code channelWritabilityChanged()}</p>
-     * <p>- the {@code ChannelFuture.addListener(new GenericFutureListener())}</p>
+     * use one of the way provided by Netty to handle the capacity:
+     * </p>
+     * <p>
+     * - the {@code Channel.isWritable()} property and the corresponding
+     * {@code channelWritabilityChanged()}
+     * </p>
+     * <p>
+     * - the {@code ChannelFuture.addListener(new GenericFutureListener())}
+     * </p>
      *
      * @param maxWriteSize the maximum Write Size allowed in the buffer
-     *            per channel before write suspended is set,
-     *            default being {@value #DEFAULT_MAX_SIZE} bytes.
+     *                     per channel before write suspended is set,
+     *                     default being {@value #DEFAULT_MAX_SIZE} bytes.
      */
     public void setMaxWriteSize(long maxWriteSize) {
         this.maxWriteSize = maxWriteSize;
@@ -407,10 +505,11 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
 
     /**
      * Called each time the accounting is computed from the TrafficCounters.
-     * This method could be used for instance to implement almost real time accounting.
+     * This method could be used for instance to implement almost real time
+     * accounting.
      *
      * @param counter
-     *            the TrafficCounter that computes its performance
+     *                the TrafficCounter that computes its performance
      */
     protected void doAccounting(TrafficCounter counter) {
         // NOOP by default
@@ -421,6 +520,7 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
      */
     static final class ReopenReadTimerTask implements Runnable {
         final ChannelHandlerContext ctx;
+
         ReopenReadTimerTask(ChannelHandlerContext ctx) {
             this.ctx = ctx;
         }
@@ -430,7 +530,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
             Channel channel = ctx.channel();
             ChannelConfig config = channel.config();
             if (!config.isAutoRead() && isHandlerActive(ctx)) {
-                // If AutoRead is False and Active is True, user make a direct setAutoRead(false)
+                // If AutoRead is False and Active is True, user make a direct
+                // setAutoRead(false)
                 // Then Just reset the status
                 if (logger.isDebugEnabled()) {
                     logger.debug("Not unsuspend: " + config.isAutoRead() + ':' +
@@ -492,7 +593,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
                 if (config.isAutoRead() && isHandlerActive(ctx)) {
                     config.setAutoRead(false);
                     channel.attr(READ_SUSPENDED).set(true);
-                    // Create a Runnable to reactive the read if needed. If one was create before it will just be
+                    // Create a Runnable to reactive the read if needed. If one was create before it
+                    // will just be
                     // reused to limit object creation
                     Attribute<Runnable> attr = channel.attr(REOPEN_TASK);
                     Runnable reopenTask = attr.get();
@@ -516,16 +618,18 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
         Channel channel = ctx.channel();
         if (channel.hasAttr(REOPEN_TASK)) {
-            //release the reopen task
+            // release the reopen task
             channel.attr(REOPEN_TASK).set(null);
         }
         super.handlerRemoved(ctx);
     }
 
     /**
-     * Method overridden in GTSH to take into account specific timer for the channel.
+     * Method overridden in GTSH to take into account specific timer for the
+     * channel.
+     * 
      * @param wait the wait delay computed in ms
-     * @param now the relative now time in ms
+     * @param now  the relative now time in ms
      * @return the wait to use according to the context
      */
     long checkWaitReadTime(final ChannelHandlerContext ctx, long wait, final long now) {
@@ -534,7 +638,9 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     }
 
     /**
-     * Method overridden in GTSH to take into account specific timer for the channel.
+     * Method overridden in GTSH to take into account specific timer for the
+     * channel.
+     * 
      * @param now the relative now time in ms
      */
     void informReadOperation(final ChannelHandlerContext ctx, final long now) {
@@ -549,7 +655,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     @Override
     public void read(ChannelHandlerContext ctx) {
         if (isHandlerActive(ctx)) {
-            // For Global Traffic (and Read when using EventLoop in pipeline) : check if READ_SUSPENDED is False
+            // For Global Traffic (and Read when using EventLoop in pipeline) : check if
+            // READ_SUSPENDED is False
             ctx.read();
         }
     }
@@ -601,7 +708,8 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     /**
      * Check the writability according to delay and size for the channel.
      * Set if necessary setUserDefinedWritability status.
-     * @param delay the computed delay
+     * 
+     * @param delay     the computed delay
      * @param queueSize the current queueSize
      */
     void checkWriteSuspend(ChannelHandlerContext ctx, long delay, long queueSize) {
@@ -609,6 +717,7 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
             setUserDefinedWritability(ctx, false);
         }
     }
+
     /**
      * Explicitly release the Write suspended status.
      */
@@ -627,12 +736,12 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     @Override
     public String toString() {
         StringBuilder builder = new StringBuilder(290)
-            .append("TrafficShaping with Write Limit: ").append(writeLimit)
-            .append(" Read Limit: ").append(readLimit)
-            .append(" CheckInterval: ").append(checkInterval)
-            .append(" maxDelay: ").append(maxWriteDelay)
-            .append(" maxSize: ").append(maxWriteSize)
-            .append(" and Counter: ");
+                .append("TrafficShaping with Write Limit: ").append(writeLimit)
+                .append(" Read Limit: ").append(readLimit)
+                .append(" CheckInterval: ").append(checkInterval)
+                .append(" maxDelay: ").append(maxWriteDelay)
+                .append(" maxSize: ").append(maxWriteSize)
+                .append(" and Counter: ");
         if (trafficCounter != null) {
             builder.append(trafficCounter);
         } else {
@@ -644,7 +753,9 @@ public abstract class AbstractTrafficShapingHandler extends ChannelDuplexHandler
     /**
      * Calculate the size of the given {@link Object}.
      *
-     * This implementation supports {@link ByteBuf} and {@link ByteBufHolder}. Sub-classes may override this.
+     * This implementation supports {@link ByteBuf} and {@link ByteBufHolder}.
+     * Sub-classes may override this.
+     * 
      * @param msg the msg for which the size should be calculated.
      * @return size the size of the msg or {@code -1} if unknown.
      */

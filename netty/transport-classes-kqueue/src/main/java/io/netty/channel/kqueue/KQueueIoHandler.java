@@ -45,51 +45,134 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import static java.lang.Math.min;
 
 /**
- * {@link IoHandler} which uses kqueue under the covers. Only works on BSD!
+ * {@link IoHandler} 的一个实现，它在底层使用 kqueue。<b>仅适用于 BSD 系统 (例如 macOS, FreeBSD)！</b>
+ * 这个类是 Netty KQueue 传输的核心，负责处理所有基于 KQueue 的 I/O 操作。
+ * KQueue 是 BSD 系统上的一种高效的 I/O 事件通知机制，类似于 Linux 上的 Epoll。
+ *
+ * <p><b>核心组件与职责：</b></p>
+ * <ul>
+ *     <li><b>KQueue 文件描述符 ({@code kqueueFd}):</b> 代表一个 KQueue 实例，用于注册和监听文件描述符上的 I/O 事件 (称为 knote)。</li>
+ *     <li><b>用户事件唤醒 ({@code KQUEUE_WAKE_UP_IDENT}):</b> KQueue 使用用户定义的事件 (EVFILT_USER) 来实现线程间唤醒。
+ *         当其他线程需要唤醒阻塞在 {@code kevent} 上的事件循环线程时，会触发此用户事件。</li>
+ *     <li><b>事件列表 ({@code eventList}) 和变更列表 ({@code changeList}):</b>
+ *         {@code changeList} 用于向 KQueue 注册或修改监听的事件 (kevent)。
+ *         {@code eventList} 用于从 {@code kevent} 系统调用接收就绪的事件。</li>
+ *     <li><b>注册表 ({@code registrations}):</b> 一个映射，将文件描述符的标识符 (ident) 映射到其对应的 {@link DefaultKqueueIoRegistration}，
+ *         后者封装了与特定 {@link KQueueIoHandle} (通常是 Channel) 相关的注册信息。</li>
+ *     <li><b>事件处理：</b> 在事件循环中调用 {@code kevent} 等待 I/O 事件，然后处理返回的就绪事件，并将它们分发给相应的 {@link KQueueIoHandle}。</li>
+ *     <li><b>唤醒机制 ({@code wakeup()}):</b> 允许其他线程安全地唤醒事件循环。</li>
+ * </ul>
+ *
+ * <p><b>与 Epoll/NIO 的比较：</b></p>
+ * <ul>
+ *     <li><b>KQueue vs Epoll:</b> KQueue 和 Epoll 都是为解决传统 select/poll 模型的性能瓶颈而设计的高性能 I/O 多路复用机制。
+ *         它们在 API 设计和具体实现上有所不同，但目标相似。KQueue 主要用于 BSD 派生系统，而 Epoll 用于 Linux。</li>
+ *     <li><b>KQueue vs NIO Selector:</b> 与 Java NIO Selector 相比，KQueue 通常能提供更高的性能和更低的延迟，尤其是在处理大量并发连接时。</li>
+ * </ul>
+ *
+ * <p><b>线程模型：</b></p>
+ * 每个 {@link KQueueIoHandler} 通常由一个专用的 {@link ThreadAwareExecutor} (通常是 {@link KQueueEventLoop}) 驱动，
+ * 所有 KQueue 操作和事件处理都在这个单线程中执行。
+ *
+ * @see Native (KQueue JNI 方法)
+ * @see KQueueIoHandle
+ * @see KQueueEventLoop
+ * @see FileDescriptor
+ * @see KQueueEventArray
  */
 public final class KQueueIoHandler implements IoHandler {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(KQueueIoHandler.class);
+    /**
+     * 用于原子更新 {@link #wakenUp} 状态的 {@link AtomicIntegerFieldUpdater}。
+     * {@code wakenUp} 标志用于控制唤醒逻辑：0 表示未唤醒，1 表示已请求唤醒。
+     */
     private static final AtomicIntegerFieldUpdater<KQueueIoHandler> WAKEN_UP_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(KQueueIoHandler.class, "wakenUp");
+    /**
+     * 用于唤醒 {@code kevent} 调用的用户事件的标识符。
+     * 当其他线程需要唤醒事件循环时，会向 KQueue 触发一个以此为 ident 的 EVFILT_USER 事件。
+     */
     private static final int KQUEUE_WAKE_UP_IDENT = 0;
-    // `kqueue()` may return EINVAL when a large number such as Integer.MAX_VALUE is specified as timeout.
-    // 24 hours would be a large enough value.
-    // https://man.freebsd.org/cgi/man.cgi?query=kevent&apropos=0&sektion=0&manpath=FreeBSD+6.1-RELEASE&format=html#end
+    // `kqueue()` 在将一个大数字（例如 Integer.MAX_VALUE）指定为超时时可能会返回 EINVAL。
+    // 24 小时应该是一个足够大的值。
+    // 参考: https://man.freebsd.org/cgi/man.cgi?query=kevent&apropos=0&sektion=0&manpath=FreeBSD+6.1-RELEASE&format=html#end
+    /**
+     * {@code kevent} 系统调用允许的最大超时时间 (秒)。
+     * 设置为 24 小时减 1 秒，以避免某些系统上对于非常大的超时值可能出现的问题 (如返回 EINVAL)。
+     */
     private static final int KQUEUE_MAX_TIMEOUT_SECONDS = 86399; // 24 hours - 1 second
 
     static {
-        // Ensure JNI is initialized by the time this class is loaded by this time!
-        // We use unix-common methods in this class which are backed by JNI methods.
+        // 确保 JNI 在此类加载时已初始化！
+        // 我们在此类中使用 unix-common 方法，这些方法由 JNI 方法支持。
         KQueue.ensureAvailability();
     }
 
+    /**
+     * 是否允许 {@link #eventList} 和 {@link #changeList} 数组在需要时自动增长。
+     */
     private final boolean allowGrowing;
+    /**
+     * KQueue 实例的文件描述符。
+     */
     private final FileDescriptor kqueueFd;
+    /**
+     * 用于向 KQueue 提交事件变更 (注册/修改监听) 的列表。
+     */
     private final KQueueEventArray changeList;
+    /**
+     * 用于从 KQueue 接收就绪事件的列表。
+     */
     private final KQueueEventArray eventList;
+    /**
+     * {@code kevent} 的选择策略。
+     */
     private final SelectStrategy selectStrategy;
+    /**
+     * 辅助类，用于处理与 JNI 相关的数组操作，主要用作 DefaultKqueueIoRegistration 的 attachment。
+     */
     private final NativeArrays nativeArrays;
     private final IntSupplier selectNowSupplier = new IntSupplier() {
         @Override
         public int get() throws Exception {
-            return kqueueWaitNow();
+            return kqueueWaitNow(); // 用于 SelectStrategy 计算
         }
     };
+    /**
+     * 驱动此 {@link KQueueIoHandler} 的执行器，通常是 {@link KQueueEventLoop}。
+     */
     private final ThreadAwareExecutor executor;
+    /**
+     * 存储文件描述符标识符 (ident) 到其对应 {@link DefaultKqueueIoRegistration} 的映射。
+     */
     private final IntObjectMap<DefaultKqueueIoRegistration> registrations = new IntObjectHashMap<>(4096);
+    /**
+     * 当前注册的 Channel 数量。
+     */
     private int numChannels;
 
+    /**
+     * 唤醒状态标志。0 表示未请求唤醒，1 表示已请求唤醒。
+     * 使用 {@link AtomicIntegerFieldUpdater} 进行原子更新。
+     */
     private volatile int wakenUp;
 
     /**
-     * Returns a new {@link IoHandlerFactory} that creates {@link KQueueIoHandler} instances.
+     * 返回一个新的 {@link IoHandlerFactory}，用于创建 {@link KQueueIoHandler} 实例。
+     * 使用默认的 {@code maxEvents} (0，表示允许事件数组动态增长) 和默认的 {@link SelectStrategyFactory}。
+     *
+     * @return {@link IoHandlerFactory} 实例。
      */
     public static IoHandlerFactory newFactory() {
         return newFactory(0, DefaultSelectStrategyFactory.INSTANCE);
     }
 
     /**
-     * Returns a new {@link IoHandlerFactory} that creates {@link KQueueIoHandler} instances.
+     * 返回一个新的 {@link IoHandlerFactory}，用于创建 {@link KQueueIoHandler} 实例。
+     *
+     * @param maxEvents             {@code kevent} 一次可以返回的最大事件数。如果为0，则事件数组的大小可以动态增长。
+     * @param selectStrategyFactory 用于创建 {@link SelectStrategy} 的工厂。
+     * @return {@link IoHandlerFactory} 实例。
      */
     public static IoHandlerFactory newFactory(final int maxEvents,
                                               final SelectStrategyFactory selectStrategyFactory) {
@@ -126,17 +209,24 @@ public final class KQueueIoHandler implements IoHandler {
         }
     }
 
+    /**
+     * 触发 KQueue 用户事件以唤醒阻塞在 {@code kevent} 上的线程。
+     */
     private void wakeup0() {
         Native.keventTriggerUserEvent(kqueueFd.intValue(), KQUEUE_WAKE_UP_IDENT);
         // Note that the result may return an error (e.g. errno = EBADF after the event loop has been shutdown).
         // So it is not very practical to assert the return value is always >= 0.
     }
 
+    /**
+     * 执行 {@code kevent} 等待操作，处理定时和唤醒逻辑。
+     *
+     * @param context     {@link IoHandlerContext}，提供定时信息。
+     * @param oldWakeup   在调用此方法之前 {@code wakenUp} 标志的值。
+     * @return {@code kevent} 返回的就绪事件数量。
+     * @throws IOException 如果 {@code kevent} 调用失败。
+     */
     private int kqueueWait(IoHandlerContext context, boolean oldWakeup) throws IOException {
-        // If a task was submitted when wakenUp value was 1, the task didn't get a chance to produce wakeup event.
-        // So we need to check task queue again before calling kqueueWait. If we don't, the task might be pended
-        // until kqueueWait was timed out. It might be pended until idle timeout if IdleStateHandler existed
-        // in pipeline.
         if (oldWakeup && !context.canBlock()) {
             return kqueueWaitNow();
         }
@@ -163,8 +253,6 @@ public final class KQueueIoHandler implements IoHandler {
             final short flags = eventList.flags(i);
             final int ident = eventList.ident(i);
             if (filter == Native.EVFILT_USER || (flags & Native.EV_ERROR) != 0) {
-                // EV_ERROR is returned if the FD is closed synchronously (which removes from kqueue) and then
-                // we later attempt to delete the filters from kqueue.
                 assert filter != Native.EVFILT_USER ||
                         (filter == Native.EVFILT_USER && ident == KQUEUE_WAKE_UP_IDENT);
                 continue;
@@ -172,9 +260,6 @@ public final class KQueueIoHandler implements IoHandler {
 
             DefaultKqueueIoRegistration registration = registrations.get(ident);
             if (registration == null) {
-                // This may happen if the channel has already been closed, and it will be removed from kqueue anyways.
-                // We also handle EV_ERROR above to skip this even early if it is a result of a referencing a closed and
-                // thus removed from kqueue FD.
                 logger.warn("events[{}]=[{}, {}] had no registration!", i, ident, filter);
                 continue;
             }
@@ -192,38 +277,7 @@ public final class KQueueIoHandler implements IoHandler {
                     return 0;
 
                 case SelectStrategy.BUSY_WAIT:
-                    // fall-through to SELECT since the busy-wait is not supported with kqueue
-
-                case SelectStrategy.SELECT:
                     strategy = kqueueWait(context, WAKEN_UP_UPDATER.getAndSet(this, 0) == 1);
-
-                    // 'wakenUp.compareAndSet(false, true)' is always evaluated
-                    // before calling 'selector.wakeup()' to reduce the wake-up
-                    // overhead. (Selector.wakeup() is an expensive operation.)
-                    //
-                    // However, there is a race condition in this approach.
-                    // The race condition is triggered when 'wakenUp' is set to
-                    // true too early.
-                    //
-                    // 'wakenUp' is set to true too early if:
-                    // 1) Selector is waken up between 'wakenUp.set(false)' and
-                    //    'selector.select(...)'. (BAD)
-                    // 2) Selector is waken up between 'selector.select(...)' and
-                    //    'if (wakenUp.get()) { ... }'. (OK)
-                    //
-                    // In the first case, 'wakenUp' is set to true and the
-                    // following 'selector.select(...)' will wake up immediately.
-                    // Until 'wakenUp' is set to false again in the next round,
-                    // 'wakenUp.compareAndSet(false, true)' will fail, and therefore
-                    // any attempt to wake up the Selector will fail, too, causing
-                    // the following 'selector.select(...)' call to block
-                    // unnecessarily.
-                    //
-                    // To fix this problem, we wake up the selector again if wakenUp
-                    // is true immediately after selector.select(...).
-                    // It is inefficient in that it wakes up the selector for both
-                    // the first case (BAD - wake-up required) and the second case
-                    // (OK - no wake-up required).
 
                     if (wakenUp == 1) {
                         wakeup0();
@@ -238,7 +292,6 @@ public final class KQueueIoHandler implements IoHandler {
             }
 
             if (allowGrowing && strategy == eventList.capacity()) {
-                //increase the size of the array as we needed the whole space for the events
                 eventList.realloc(false);
             }
         } catch (Error e) {
@@ -272,8 +325,6 @@ public final class KQueueIoHandler implements IoHandler {
     private static void handleLoopException(Throwable t) {
         logger.warn("Unexpected exception in the selector loop.", t);
 
-        // Prevent possible consecutive immediate failures that lead to
-        // excessive CPU consumption.
         try {
             Thread.sleep(1000);
         } catch (InterruptedException e) {
@@ -289,8 +340,6 @@ public final class KQueueIoHandler implements IoHandler {
             // ignore on close
         }
 
-        // Using the intermediate collection to prevent ConcurrentModificationException.
-        // In the `close()` method, the channel is deleted from `channels` map.
         DefaultKqueueIoRegistration[] copy = registrations.values().toArray(new DefaultKqueueIoRegistration[0]);
 
         for (DefaultKqueueIoRegistration reg: copy) {
@@ -307,7 +356,6 @@ public final class KQueueIoHandler implements IoHandler {
                 logger.warn("Failed to close the kqueue fd.", e);
             }
         } finally {
-            // Cleanup all native memory!
             nativeArrays.free();
             changeList.free();
             eventList.free();
@@ -325,7 +373,6 @@ public final class KQueueIoHandler implements IoHandler {
                 executor, kqueueHandle);
         DefaultKqueueIoRegistration old = registrations.put(kqueueHandle.ident(), registration);
         if (old != null) {
-            // restore old mapping and throw exception
             registrations.put(kqueueHandle.ident(), old);
             throw new IllegalStateException("registration for the KQueueIoHandle.ident() already exists");
         }
@@ -423,7 +470,6 @@ public final class KQueueIoHandler implements IoHandler {
             DefaultKqueueIoRegistration old = registrations.remove(ident);
             if (old != null) {
                 if (old != this) {
-                    // The Channel mapping was already replaced due FD reuse, put back the stored Channel.
                     registrations.put(ident, old);
                 } else if (old.handle instanceof AbstractKQueueChannel.AbstractKQueueUnsafe) {
                     numChannels--;

@@ -18,15 +18,17 @@ package io.netty.channel;
 import io.netty.util.concurrent.ThreadAwareExecutor;
 
 /**
- * Factory for {@link IoHandler} instances.
+ * {@link IoHandler} 实例的工厂接口。
+ * 用于创建处理 I/O 事件的 {@link IoHandler}。
  */
 public interface IoHandlerFactory {
 
     /**
-     * Creates a new {@link IoHandler} instance.
+     * 创建一个新的 {@link IoHandler} 实例。
      *
-     * @param ioExecutor        the {@link ThreadAwareExecutor} for the {@link IoHandler}.
-     * @return                  a new {@link IoHandler} instance.
+     * @param ioExecutor        用于 {@link IoHandler} 的 {@link ThreadAwareExecutor}。
+     *                          此执行器将负责执行 {@link IoHandler} 中的任务。
+     * @return                  一个新的 {@link IoHandler} 实例。
      */
     IoHandler newHandler(ThreadAwareExecutor ioExecutor);
 }
