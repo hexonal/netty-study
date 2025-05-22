@@ -36,10 +36,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Single-thread singleton {@link EventExecutor}.  It starts the thread automatically and stops it when there is no
- * task pending in the task queue for {@code io.netty.globalEventExecutor.quietPeriodSeconds} second
- * (default is 1 second).  Please note it is not scalable to schedule large number of tasks to this executor;
- * use a dedicated executor.
+ * 单线程全局单例 {@link EventExecutor}。
+ * <p>
+ * <b>设计意图：</b>
+ * <ul>
+ *   <li>为全局任务（如定时任务、全局回调等）提供统一的事件执行器。</li>
+ *   <li>采用单线程模型，保证任务串行执行，避免并发冲突。</li>
+ *   <li>自动管理线程生命周期，无任务时自动停止，节省资源。</li>
+ *   <li>不适合大量任务并发调度，建议仅用于全局轻量级任务。</li>
+ * </ul>
+ * <b>性能优化：</b>
+ * <ul>
+ *   <li>任务队列采用高效的 LinkedBlockingQueue，支持高并发任务提交。</li>
+ *   <li>线程按需启动与回收，避免长期空转浪费。</li>
+ *   <li>定时任务与普通任务统一调度，减少线程切换和上下文切换开销。</li>
+ * </ul>
  */
 public final class GlobalEventExecutor extends AbstractScheduledEventExecutor implements OrderedEventExecutor {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(GlobalEventExecutor.class);
@@ -56,9 +67,20 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
         SCHEDULE_QUIET_PERIOD_INTERVAL = TimeUnit.SECONDS.toNanos(quietPeriod);
     }
 
+    /**
+     * 全局唯一实例，单例模式。
+     */
     public static final GlobalEventExecutor INSTANCE = new GlobalEventExecutor();
 
+    /**
+     * 任务队列，支持高并发任务提交。
+     * <b>性能优化：</b> LinkedBlockingQueue 线程安全，适合多线程环境。
+     */
     final BlockingQueue<Runnable> taskQueue = new LinkedBlockingQueue<Runnable>();
+
+    /**
+     * 用于保持线程存活的空任务，防止线程过早退出。
+     */
     final ScheduledFutureTask<Void> quietPeriodTask = new ScheduledFutureTask<Void>(
             this, Executors.<Void>callable(new Runnable() {
         @Override
@@ -66,16 +88,14 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
             // NOOP
         }
     }, null),
-            // note: the getCurrentTimeNanos() call here only works because this is a final class, otherwise the method
-            // could be overridden leading to unsafe initialization here!
+            // 注意：此处调用 getCurrentTimeNanos() 之所以安全，是因为 GlobalEventExecutor 是 final 类，
+            // 不会被子类重写该方法，避免了初始化时多态带来的不确定性。
+            // 若为非 final 类，子类可能重写 getCurrentTimeNanos()，导致初始化时行为不可控。
             deadlineNanos(getCurrentTimeNanos(), SCHEDULE_QUIET_PERIOD_INTERVAL),
             -SCHEDULE_QUIET_PERIOD_INTERVAL
     );
 
-    // because the GlobalEventExecutor is a singleton, tasks submitted to it can come from arbitrary threads and this
-    // can trigger the creation of a thread from arbitrary thread groups; for this reason, the thread factory must not
-    // be sticky about its thread group
-    // visible for testing
+    // 线程工厂，确保线程组不固定，避免线程泄漏
     final ThreadFactory threadFactory;
     private final TaskRunner taskRunner = new TaskRunner();
     private final AtomicBoolean started = new AtomicBoolean();
@@ -94,9 +114,11 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
     }
 
     /**
-     * Take the next {@link Runnable} from the task queue and so will block if no task is currently present.
+     * 从任务队列中获取下一个 {@link Runnable}，若无任务则阻塞等待。
+     * <br>
+     * <b>性能优化：</b> 优先处理定时任务，避免饥饿；无定时任务时高效阻塞等待，节省 CPU。
      *
-     * @return {@code null} if the executor thread has been interrupted or waken up.
+     * @return 若线程被中断或唤醒，返回 null
      */
     Runnable takeTask() {
         BlockingQueue<Runnable> taskQueue = this.taskQueue;
@@ -122,10 +144,7 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
                     }
                 }
                 if (task == null) {
-                    // We need to fetch the scheduled tasks now as otherwise there may be a chance that
-                    // scheduled tasks are never executed if there is always one task in the taskQueue.
-                    // This is for example true for the read task of OIO Transport
-                    // See https://github.com/netty/netty/issues/1614
+                    // 性能优化：及时将到期的定时任务转移到主队列，避免定时任务饿死
                     fetchFromScheduledTaskQueue();
                     task = taskQueue.poll();
                 }
@@ -137,6 +156,9 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
         }
     }
 
+    /**
+     * 将到期的定时任务批量转移到主任务队列，提升调度效率。
+     */
     private void fetchFromScheduledTaskQueue() {
         long nanoTime = getCurrentTimeNanos();
         Runnable scheduledTask = pollScheduledTask(nanoTime);
@@ -147,15 +169,14 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
     }
 
     /**
-     * Return the number of tasks that are pending for processing.
+     * 返回当前待处理任务数。
      */
     public int pendingTasks() {
         return taskQueue.size();
     }
 
     /**
-     * Add a task to the task queue, or throws a {@link RejectedExecutionException} if this instance was shutdown
-     * before.
+     * 添加任务到队列，若已关闭则抛出异常。
      */
     private void addTask(Runnable task) {
         taskQueue.add(ObjectUtil.checkNotNull(task, "task"));
@@ -203,12 +224,11 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
     }
 
     /**
-     * Waits until the worker thread of this executor has no tasks left in its task queue and terminates itself.
-     * Because a new worker thread will be started again when a new task is submitted, this operation is only useful
-     * when you want to ensure that the worker thread is terminated <strong>after</strong> your application is shut
-     * down and there's no chance of submitting a new task afterwards.
+     * 阻塞等待全局线程无任务后自动退出。
+     * <br>
+     * <b>典型场景：</b> 应用关闭后确保线程已终止，防止资源泄漏。
      *
-     * @return {@code true} if and only if the worker thread has been terminated
+     * @return 仅当线程已终止时返回 true
      */
     public boolean awaitInactivity(long timeout, TimeUnit unit) throws InterruptedException {
         ObjectUtil.checkNotNull(unit, "unit");
@@ -226,6 +246,11 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
         execute0(task);
     }
 
+    /**
+     * 提交任务并按需启动线程。
+     * <br>
+     * <b>性能优化：</b> 仅在有任务时启动线程，避免空转浪费。
+     */
     private void execute0(@Schedule Runnable task) {
         addTask(ObjectUtil.checkNotNull(task, "task"));
         if (!inEventLoop()) {
@@ -233,6 +258,11 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
         }
     }
 
+    /**
+     * 启动全局线程，采用原子操作保证线程安全。
+     * <br>
+     * <b>性能优化：</b> 线程仅在首次有任务时启动，后续复用，避免频繁创建销毁。
+     */
     private void startThread() {
         if (started.compareAndSet(false, true)) {
             final Thread callingThread = Thread.currentThread();
@@ -242,20 +272,14 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
                     return callingThread.getContextClassLoader();
                 }
             });
-            // Avoid calling classloader leaking through Thread.inheritedAccessControlContext.
+            // 避免线程组泄漏，防止内存泄漏
             setContextClassLoader(callingThread, null);
             try {
                 final Thread t = threadFactory.newThread(taskRunner);
-                // Set to null to ensure we not create classloader leaks by holds a strong reference to the inherited
-                // classloader.
-                // See:
-                // - https://github.com/netty/netty/issues/7290
-                // - https://bugs.openjdk.java.net/browse/JDK-7008595
+                // 防止 classloader 泄漏，见相关 issue
                 setContextClassLoader(t, null);
 
-                // Set the thread before starting it as otherwise inEventLoop() may return false and so produce
-                // an assert error.
-                // See https://github.com/netty/netty/issues/4357
+                // 先设置 thread，再启动，保证 inEventLoop() 正确
                 thread = t;
                 t.start();
             } finally {
@@ -274,6 +298,11 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
         });
     }
 
+    /**
+     * 全局任务执行主循环，串行处理所有任务。
+     * <br>
+     * <b>性能优化：</b> 线程空闲时自动退出，减少资源占用；新任务到来时自动重启。
+     */
     final class TaskRunner implements Runnable {
         @Override
         public void run() {
@@ -292,35 +321,26 @@ public final class GlobalEventExecutor extends AbstractScheduledEventExecutor im
                 }
 
                 Queue<ScheduledFutureTask<?>> scheduledTaskQueue = GlobalEventExecutor.this.scheduledTaskQueue;
-                // Terminate if there is no task in the queue (except the noop task).
+                // 若主队列和定时队列均为空（仅剩空任务），则安全退出线程，节省资源
                 if (taskQueue.isEmpty() && (scheduledTaskQueue == null || scheduledTaskQueue.size() == 1)) {
-                    // Mark the current thread as stopped.
-                    // The following CAS must always success and must be uncontended,
-                    // because only one thread should be running at the same time.
+                    // 标记线程已停止，保证只有一个线程在运行
                     boolean stopped = started.compareAndSet(true, false);
                     assert stopped;
 
-                    // Check if there are pending entries added by execute() or schedule*() while we do CAS above.
-                    // Do not check scheduledTaskQueue because it is not thread-safe and can only be mutated from a
-                    // TaskRunner actively running tasks.
+                    // 检查是否有新任务到来，若有则重启线程，保证任务不丢失
                     if (taskQueue.isEmpty()) {
-                        // A) No new task was added and thus there's nothing to handle
-                        //    -> safe to terminate because there's nothing left to do
-                        // B) A new thread started and handled all the new tasks.
-                        //    -> safe to terminate the new thread will take care the rest
+                        // A) 无新任务，安全退出
+                        // B) 新线程已启动，安全退出
                         break;
                     }
 
-                    // There are pending tasks added again.
+                    // 有新任务到来，尝试重启线程，保证任务及时处理
                     if (!started.compareAndSet(false, true)) {
-                        // startThread() started a new thread and set 'started' to true.
-                        // -> terminate this thread so that the new thread reads from taskQueue exclusively.
+                        // 新线程已启动，当前线程退出
                         break;
                     }
 
-                    // New tasks were added, but this worker was faster to set 'started' to true.
-                    // i.e. a new worker thread was not started by startThread().
-                    // -> keep this thread alive to handle the newly added entries.
+                    // 当前线程更快，继续处理新任务
                 }
             }
         }
