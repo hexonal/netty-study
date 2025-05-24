@@ -1,23 +1,12 @@
-package io.netty.bootstrap.s2025_5_22;
+package io.netty.s2025_5_22;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
-import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.CharsetUtil;
-import io.netty.util.IntSupplier;
-import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
-import io.netty.util.concurrent.DefaultThreadFactory;
-import io.netty.util.concurrent.EventExecutorChooserFactory;
-
-import java.nio.channels.spi.SelectorProvider;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * 客户端的启动类
@@ -26,7 +15,6 @@ import java.util.concurrent.Executors;
  * @date 22 5月 2025 16:10
  */
 public class ServerBootstrapStudy {
-	EventLoopGroup group;
 
 	
 

@@ -1,4 +1,4 @@
-package io.netty.bootstrap.s2025_5_22;
+package io.netty.s2025_5_22;
 
 import io.netty.bootstrap.Bootstrap;
 
